@@ -1,9 +1,9 @@
-# depscore
+# depit
 
 **Should I install this?** See what a single npm dependency *really* drags in — packages, disk, and the install scripts that run code on your machine — **before** you run `npm install`.
 
 ```sh
-npx depscore express
+npx depit express
 ```
 
 ```
@@ -19,12 +19,12 @@ npx depscore express
   resolved like npm — highest version satisfying each range
 ```
 
-You asked for **1** package. You got **68**. That's the npm deal — and most of the time you never look. `depscore` makes you look, in two seconds, with no install.
+You asked for **1** package. You got **68**. That's the npm deal — and most of the time you never look. `depit` makes you look, in two seconds, with no install.
 
 **Or audit your whole app at once** — run it with no argument in any project:
 
 ```sh
-npx depscore
+npx depit
 ```
 ```
   should i trust my-app's dependencies ?
@@ -51,16 +51,16 @@ Every `npm install` is a trust decision you make blind:
 
 - **You add 1 package, you trust 68** — and **38 maintainers** you've never heard of. Each is code, and a person with publish rights, that ends up in your app.
 - **Some run scripts on your machine** the moment they install (`postinstall`, `preinstall`). That's the exact door supply-chain attacks walk through.
-- **Some are deprecated or abandoned** — `depscore` shows the oldest dep's last publish, so "last shipped 11 years ago" stops being a surprise *after* it's in your lockfile.
+- **Some are deprecated or abandoned** — `depit` shows the oldest dep's last publish, so "last shipped 11 years ago" stops being a surprise *after* it's in your lockfile.
 
-`depscore` answers all of that **before** you commit, straight from the npm registry. No install. No `node_modules`. No dependencies of its own.
+`depit` answers all of that **before** you commit, straight from the npm registry. No install. No `node_modules`. No dependencies of its own.
 
 ## Real CVEs — not guesses
 
-`depscore` checks every resolved package against npm's own advisory database (the same data `npm audit` uses) and matches the exact vulnerable version ranges across the **whole tree** — transitive deps included. No Snyk account, no AI that might hallucinate a CVE, no token.
+`depit` checks every resolved package against npm's own advisory database (the same data `npm audit` uses) and matches the exact vulnerable version ranges across the **whole tree** — transitive deps included. No Snyk account, no AI that might hallucinate a CVE, no token.
 
 ```sh
-npx depscore lodash@4.17.4
+npx depit lodash@4.17.4
 ```
 ```
   🛡  10 known vulnerabilities (1 critical, 4 high, 5 moderate)
@@ -74,12 +74,12 @@ A critical CVE alone forces an **F** (exit 2), so it gates CI. Install a patched
 
 ## The killer feature: it shows you the actual install script
 
-Other tools tell you a package *has* an install script. `depscore` shows you **the exact command that will run on your machine** — and flags it if it reaches the network, pipes to a shell, evals, or reads your env.
+Other tools tell you a package *has* an install script. `depit` shows you **the exact command that will run on your machine** — and flags it if it reaches the network, pipes to a shell, evals, or reads your env.
 
 A legit native build looks calm:
 
 ```sh
-npx depscore node-sass
+npx depit node-sass
 ```
 ```
   ⚠  1 package runs code on your machine at install:
@@ -102,7 +102,7 @@ A package doing something it shouldn't lights up red:
               pipe-to-shell — read the command above before you trust it."
 ```
 
-`npm install` runs these **before any of your own code** — it's the exact door supply-chain attacks walk through. `depscore` reads the literal command straight from the registry (no install, no tarball download) and scans it for:
+`npm install` runs these **before any of your own code** — it's the exact door supply-chain attacks walk through. `depit` reads the literal command straight from the registry (no install, no tarball download) and scans it for:
 
 `network` · `pipe-to-shell` · `dynamic-exec` · `obfuscation` · `reads-env` · `destructive/recon`
 
@@ -111,13 +111,13 @@ So "I'll just install it" becomes a decision instead of a reflex.
 ## Usage
 
 ```sh
-npx depscore <package>      # audit one package before you add it
-npx depscore react
-npx depscore @scope/name
-npx depscore left-pad@1.3.0  # pin a version or range
-npx depscore express@^5      # ranges work — resolved like npm
+npx depit <package>      # audit one package before you add it
+npx depit react
+npx depit @scope/name
+npx depit left-pad@1.3.0  # pin a version or range
+npx depit express@^5      # ranges work — resolved like npm
 
-npx depscore                 # no arg → audit ./package.json's whole tree
+npx depit                 # no arg → audit ./package.json's whole tree
 ```
 
 No flags to learn. Run it, read the card, move on.
@@ -132,7 +132,7 @@ No flags to learn. Run it, read the card, move on.
 
 ```sh
 # fail a PR that tries to add a package graded F
-npx depscore "$NEW_DEP" || exit 1
+npx depit "$NEW_DEP" || exit 1
 ```
 
 ## What the grade means
@@ -158,15 +158,15 @@ Zero runtime dependencies. Node 18+.
 
 ## Install (optional)
 
-`npx depscore <pkg>` needs no install. If you want it on your PATH:
+`npx depit <pkg>` needs no install. If you want it on your PATH:
 
 ```sh
-npm i -g depscore
+npm i -g depit
 ```
 
 ## How it compares
 
-|  | **depscore** | npq | should-install | howfat |
+|  | **depit** | npq | should-install | howfat |
 | --- | :---: | :---: | :---: | :---: |
 | Real CVEs (npm advisories) | ✅ | via Snyk | AI-guessed | ❌ |
 | Shows the literal install-script command | ✅ | ❌ (warns only) | ❌ | ❌ |
@@ -179,7 +179,7 @@ npm i -g depscore
 | Deterministic (same answer every run) | ✅ | ✅ | ❌ | ✅ |
 | Changes your workflow | no (read-only) | yes (`npq install`) | no | no |
 
-`depscore` is the only one that is **zero-dependency, needs nothing installed, and shows you the exact command an install script will run** — backed by real advisory data instead of an AI's best guess.
+`depit` is the only one that is **zero-dependency, needs nothing installed, and shows you the exact command an install script will run** — backed by real advisory data instead of an AI's best guess.
 
 ## License
 

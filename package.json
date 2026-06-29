@@ -1,10 +1,10 @@
 {
-  "name": "depscore",
+  "name": "depit",
   "version": "0.5.0",
   "description": "Should I install this? Audit any npm package — or your whole project — before you install: real (npm-accurate) dependency count, disk, maintainers you'd trust, stale deps, and the literal install scripts that run code on your machine.",
   "type": "module",
   "bin": {
-    "depscore": "cli.js"
+    "depit": "cli.js"
   },
   "files": [
     "cli.js"
@@ -29,7 +29,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/davesheffer/depscore.git"
+    "url": "git+https://github.com/davesheffer/depit.git"
   },
   "license": "MIT",
   "author": ""

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// depscore — "should i install <pkg>?"
+// depit — "should i install <pkg>?"
 // Resolves a package's (or your whole project's) dependency tree straight from
 // the npm registry — no install, no node_modules — and prints a scorecard:
 // how many packages you'd really add, how much disk, how many maintainers you'd
@@ -9,7 +9,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 
-const REGISTRY = process.env.DEPSCORE_REGISTRY || "https://registry.npmjs.org";
+const REGISTRY = process.env.DEPIT_REGISTRY || "https://registry.npmjs.org";
 // Full packument — carries maintainers, publish times, and scripts, which the
 // abbreviated form drops. One request per unique package covers every metric.
 const ACCEPT = "application/json";
@@ -488,10 +488,10 @@ async function shutdown(code) {
 // ===================== main =====================
 function usage() {
   console.log(
-    `\n  ${bold("depscore")} ${dim("— should i install this?")}\n\n` +
-    `  ${cyan("npx depscore <package>")}   ${dim("audit one package before you add it")}\n` +
-    `  ${cyan("npx depscore")}             ${dim("audit every dependency in ./package.json")}\n\n` +
-    `  e.g.  ${dim("npx depscore express")}\n`
+    `\n  ${bold("depit")} ${dim("— should i install this?")}\n\n` +
+    `  ${cyan("npx depit <package>")}   ${dim("audit one package before you add it")}\n` +
+    `  ${cyan("npx depit")}             ${dim("audit every dependency in ./package.json")}\n\n` +
+    `  e.g.  ${dim("npx depit express")}\n`
   );
 }
 
