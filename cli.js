@@ -6,8 +6,12 @@
 // machine. Zero runtime dependencies.
 
 const REGISTRY = process.env.SHOULDI_REGISTRY || "https://registry.npmjs.org";
-const ACCEPT = "application/vnd.npm.install-v1+json"; // abbreviated metadata
+// Full packument — carries maintainers, publish times, and scripts, which the
+// abbreviated form drops. One request per package covers every metric.
+const ACCEPT = "application/json";
 const CONCURRENCY = 12;
+const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+const STALE_MS = 2 * YEAR_MS; // last publish older than this = stale
 
 // ---------- tiny ANSI (no deps) ----------
 const useColor =
@@ -57,6 +61,26 @@ function bytes(n) {
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 }
 
+function age(iso) {
+  if (!iso) return "?";
+  const ms = Date.now() - Date.parse(iso);
+  if (Number.isNaN(ms)) return "?";
+  const y = ms / YEAR_MS;
+  if (y >= 1) return `${y.toFixed(y < 10 ? 1 : 0)}y`;
+  const mo = ms / (30 * 24 * 60 * 60 * 1000);
+  if (mo >= 1) return `${Math.round(mo)}mo`;
+  const w = ms / (7 * 24 * 60 * 60 * 1000);
+  if (w >= 1) return `${Math.round(w)}w`;
+  return "days";
+}
+
+// Full packuments don't carry the abbreviated `hasInstallScript` boolean, so
+// detect it the way npm does: presence of an install-lifecycle script.
+function hasInstallScript(meta) {
+  const s = meta.scripts || {};
+  return !!(s.install || s.preinstall || s.postinstall);
+}
+
 async function fetchPackument(name) {
   const url = `${REGISTRY}/${name.replace("/", "%2f")}`;
   const res = await fetch(url, { headers: { accept: ACCEPT } });
@@ -96,9 +120,13 @@ async function resolve(rootName, rootVersion) {
             version: v,
             depth: item.depth,
             size: (meta.dist && meta.dist.unpackedSize) || 0,
-            installScript: !!meta.hasInstallScript,
+            installScript: hasInstallScript(meta),
             deprecated: !!meta.deprecated,
             deps: Object.keys(meta.dependencies || {}),
+            maintainers: (pkg.maintainers || meta.maintainers || [])
+              .map((m) => (typeof m === "string" ? m : m && m.name))
+              .filter(Boolean),
+            publishedAt: (pkg.time && pkg.time[v]) || null,
           };
           seen.set(item.name, record);
           return record;
@@ -130,9 +158,24 @@ function score(records, rootName) {
   const deprecated = records.filter((r) => r.deprecated);
   const direct = records.filter((r) => r.depth === 1).length;
 
+  // people you'd be trusting: union of maintainers across the whole tree
+  const maintainerSet = new Set();
+  for (const r of records) for (const m of r.maintainers) maintainerSet.add(m);
+  const maintainers = maintainerSet.size;
+
+  // staleness: oldest dep + how many haven't shipped in 2+ years
+  const dated = records.filter((r) => r.publishedAt);
+  const now = Date.now();
+  let oldest = null;
+  for (const r of dated)
+    if (!oldest || Date.parse(r.publishedAt) < Date.parse(oldest.publishedAt))
+      oldest = r;
+  const stale = dated.filter((r) => now - Date.parse(r.publishedAt) > STALE_MS);
+
   let pts = 100;
   pts -= Math.min(40, installScripts.length * 8);
   pts -= Math.min(24, deprecated.length * 6);
+  pts -= Math.min(15, stale.length * 3);
   if (size > 50e6) pts -= 20;
   else if (size > 10e6) pts -= 10;
   else if (size > 2e6) pts -= 5;
@@ -144,16 +187,32 @@ function score(records, rootName) {
   const grade =
     pts >= 90 ? "A" : pts >= 80 ? "B" : pts >= 70 ? "C" : pts >= 55 ? "D" : "F";
 
+  const oldestYears = oldest ? (now - Date.parse(oldest.publishedAt)) / YEAR_MS : 0;
+
   let quip;
   if (installScripts.length)
     quip = `${installScripts.length} package${installScripts.length > 1 ? "s" : ""} run${installScripts.length > 1 ? "" : "s"} code on your machine at install — review before trusting.`;
-  else if (total > 200) quip = "heavy. one import, a whole neighborhood moves in.";
   else if (deprecated.length) quip = "ships deprecated packages — may rot soon.";
+  else if (oldestYears >= 4 && pts < 88)
+    quip = "some deps haven't shipped in years — may be unmaintained.";
+  else if (total > 200) quip = "heavy. one import, a whole neighborhood moves in.";
   else if (total === 0) quip = "zero dependencies. install with confidence.";
   else if (total <= 10) quip = "lean. safe to add.";
   else quip = "fine — typical for its size.";
 
-  return { total, size, installScripts, deprecated, direct, grade, quip, pts };
+  return {
+    total,
+    size,
+    installScripts,
+    deprecated,
+    direct,
+    maintainers,
+    oldest,
+    stale,
+    grade,
+    quip,
+    pts,
+  };
 }
 
 // ---------- render ----------
@@ -179,6 +238,11 @@ function render(rootName, rootVersion, s, errCount) {
       `(${s.direct} direct, you asked for 1)`
     )}`
   );
+  out.push(
+    `  👤 ${bold(String(s.maintainers))} maintainer${
+      s.maintainers === 1 ? "" : "s"
+    } you'd be trusting`
+  );
   out.push(`  💾 ${bold(bytes(s.size))} on disk`);
   if (s.installScripts.length) {
     out.push(
@@ -202,6 +266,17 @@ function render(rootName, rootVersion, s, errCount) {
   }
   if (s.deprecated.length)
     out.push(`  🪦 ${bold(String(s.deprecated.length))} deprecated package(s)`);
+  if (s.oldest) {
+    const a = age(s.oldest.publishedAt);
+    const staleTag = s.stale.length
+      ? dim(` (${s.stale.length} stale, 2y+)`)
+      : "";
+    out.push(
+      `  🕰  oldest dep last shipped ${bold(a)} ago${
+        a === "?" ? "" : dim(" — " + s.oldest.name)
+      }${staleTag}`
+    );
+  }
   out.push(line);
   out.push(
     `  ${bold("GRADE")}  ${bold(gradeColor(s.grade))}   ${dim('"' + s.quip + '"')}`

@@ -1,6 +1,6 @@
 {
   "name": "shouldi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Should I install this? See what a single npm dependency really drags in — packages, disk, and install scripts that run on your machine — before you install it.",
   "type": "module",
   "bin": {
