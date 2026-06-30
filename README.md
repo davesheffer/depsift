@@ -43,6 +43,19 @@ npx depsift
 
 That's your entire `dependencies` + `devDependencies` tree — every maintainer you trust and every install script that runs — in two seconds, no install.
 
+### npm, pnpm, bun, yarn
+
+In project mode `depsift` reads your **lockfile** when one is present, so the audit reflects the *exact* versions you actually installed — not a fresh re-resolve. Auto-detected, in this order:
+
+| Lockfile | Manager |
+| --- | --- |
+| `pnpm-lock.yaml` | pnpm (v5 / v6 / v9) |
+| `bun.lock` | bun (text lockfile) |
+| `package-lock.json` · `npm-shrinkwrap.json` | npm |
+| `yarn.lock` | yarn (classic & berry) |
+
+No lockfile (or `--no-lock`) falls back to resolving `package.json` ranges the way npm would — highest version satisfying each range. Bun's **binary** `bun.lockb` can't be read without bun; depsift says so and audits your `package.json` ranges instead (run `bun install --save-text-lockfile` to get a readable `bun.lock`). The CLI itself has zero dependencies and runs under any of them — `npx`, `pnpm dlx`, `bunx`, `yarn dlx`.
+
 ---
 
 ## Why

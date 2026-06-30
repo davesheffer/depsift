@@ -1,6 +1,6 @@
 {
   "name": "depsift",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Should I install this? Audit any npm package — or your whole project — before you install: real (npm-accurate) dependency count, disk, maintainers you'd trust, stale deps, and the literal install scripts that run code on your machine.",
   "type": "module",
   "bin": {
@@ -13,7 +13,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node cli.js express"
+    "test": "node --test",
+    "test:smoke": "node cli.js express"
   },
   "keywords": [
     "npm",

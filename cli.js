@@ -6,8 +6,9 @@
 // be trusting, how stale they are, and the literal install scripts that run
 // code on your machine. Zero runtime dependencies.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const REGISTRY = process.env.DEPSIFT_REGISTRY || "https://registry.npmjs.org";
 // Full packument — carries maintainers, publish times, and scripts, which the
@@ -263,6 +264,27 @@ function resolveSpec(pkg, spec) {
   return ms || tags.latest || versions[versions.length - 1];
 }
 
+// Build a scorecard record for an exact name@version from its full packument.
+// Shared by the range resolver (resolveSeeds) and the lockfile resolver
+// (resolveLocked) so both produce identical record shapes.
+function buildRecord(name, version, depth, pkg) {
+  const meta = (pkg.versions || {})[version] || {};
+  return {
+    key: `${name}@${version}`,
+    name,
+    version,
+    depth,
+    size: (meta.dist && meta.dist.unpackedSize) || 0,
+    installCmds: installCommands(meta),
+    installScript: installCommands(meta).length > 0,
+    deprecated: !!meta.deprecated,
+    maintainers: (pkg.maintainers || meta.maintainers || [])
+      .map((m) => (typeof m === "string" ? m : m && m.name))
+      .filter(Boolean),
+    publishedAt: (pkg.time && pkg.time[version]) || null,
+  };
+}
+
 // ===================== resolver (version-accurate, deduped by name@version) =====================
 async function resolveSeeds(seeds) {
   const packs = new Map(); // name -> Promise<packument>
@@ -293,20 +315,7 @@ async function resolveSeeds(seeds) {
         if (seen.has(key)) return;
         seen.set(key, null);
         const meta = (pkg.versions || {})[v] || {};
-        seen.set(key, {
-          key,
-          name: req.name,
-          version: v,
-          depth: req.depth,
-          size: (meta.dist && meta.dist.unpackedSize) || 0,
-          installCmds: installCommands(meta),
-          installScript: installCommands(meta).length > 0,
-          deprecated: !!meta.deprecated,
-          maintainers: (pkg.maintainers || meta.maintainers || [])
-            .map((m) => (typeof m === "string" ? m : m && m.name))
-            .filter(Boolean),
-          publishedAt: (pkg.time && pkg.time[v]) || null,
-        });
+        seen.set(key, buildRecord(req.name, v, req.depth, pkg));
         for (const [dn, dr] of Object.entries(meta.dependencies || {}))
           next.push({ name: dn, spec: dr, depth: req.depth + 1 });
       })
@@ -315,6 +324,218 @@ async function resolveSeeds(seeds) {
   }
 
   return { records: [...seen.values()].filter(Boolean), errors };
+}
+
+// ===================== lockfile resolver (exact installed versions) =====================
+// Given the pinned name@version set a lockfile already resolved, fetch each
+// unique package's metadata and build records — no range math, no tree walk.
+// This reflects what's actually on disk, version-for-version.
+async function resolveLocked(entries) {
+  const uniq = new Map(); // "name@version" -> entry (shallowest depth wins)
+  for (const e of entries) {
+    const key = `${e.name}@${e.version}`;
+    const cur = uniq.get(key);
+    if (!cur || e.depth < cur.depth) uniq.set(key, e);
+  }
+  const list = [...uniq.values()];
+  const packs = new Map(); // name -> Promise<packument> (one request per name)
+  const getPack = (name) => {
+    if (!packs.has(name)) packs.set(name, fetchPackument(name));
+    return packs.get(name);
+  };
+  const records = [];
+  const errors = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < list.length) {
+      const e = list[idx++];
+      let pkg;
+      try {
+        pkg = await getPack(e.name);
+      } catch (err) {
+        errors.push(`${e.name}: ${err.message}`);
+        continue;
+      }
+      if (!(pkg.versions && pkg.versions[e.version])) {
+        errors.push(`${e.name}@${e.version}: not on registry`);
+        continue;
+      }
+      records.push(buildRecord(e.name, e.version, e.depth, pkg));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, list.length) }, worker));
+  return { records, errors };
+}
+
+// ===================== lockfile parsers (zero-dep) =====================
+// Tolerant JSON: strips // and /* */ comments and trailing commas while
+// respecting string literals (so https:// inside a value survives). Enough to
+// read bun's text lockfile (bun.lock), which is JSONC, not strict JSON.
+function parseJsonc(text) {
+  let out = "";
+  let i = 0;
+  const n = text.length;
+  let inStr = false, esc = false;
+  const skipWsComments = (j) => {
+    while (j < n) {
+      const c = text[j];
+      if (c === " " || c === "\t" || c === "\r" || c === "\n") { j++; continue; }
+      if (c === "/" && text[j + 1] === "/") { j += 2; while (j < n && text[j] !== "\n") j++; continue; }
+      if (c === "/" && text[j + 1] === "*") { j += 2; while (j < n && !(text[j] === "*" && text[j + 1] === "/")) j++; j += 2; continue; }
+      break;
+    }
+    return j;
+  };
+  while (i < n) {
+    const ch = text[i];
+    if (inStr) {
+      out += ch;
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      i++;
+      continue;
+    }
+    if (ch === '"') { inStr = true; out += ch; i++; continue; }
+    if (ch === "/" && text[i + 1] === "/") { i += 2; while (i < n && text[i] !== "\n") i++; continue; }
+    if (ch === "/" && text[i + 1] === "*") { i += 2; while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++; i += 2; continue; }
+    if (ch === ",") {
+      const j = skipWsComments(i + 1);
+      if (j < n && (text[j] === "}" || text[j] === "]")) { i++; continue; } // drop trailing comma
+      out += ch; i++; continue;
+    }
+    out += ch; i++;
+  }
+  return JSON.parse(out);
+}
+
+// npm package-lock.json / npm-shrinkwrap.json (lockfileVersion 1, 2, 3).
+function parsePackageLock(json) {
+  const out = [];
+  if (json.packages && typeof json.packages === "object") {
+    for (const [path, entry] of Object.entries(json.packages)) {
+      if (path === "" || !entry || entry.link) continue; // root + workspace links
+      const version = entry.version;
+      if (!version || !svParse(version)) continue; // skip git/file/non-semver
+      const marker = path.lastIndexOf("node_modules/");
+      const name = marker === -1 ? entry.name || path : path.slice(marker + "node_modules/".length);
+      if (name) out.push({ name, version });
+    }
+    return out;
+  }
+  const walk = (deps) => {
+    for (const [name, info] of Object.entries(deps || {})) {
+      if (info && info.version && svParse(info.version)) out.push({ name, version: info.version });
+      if (info && info.dependencies) walk(info.dependencies);
+    }
+  };
+  walk(json.dependencies);
+  return out;
+}
+
+// One pnpm depPath key -> { name, version }. Handles v5 (/name/ver_peer),
+// v6 (/name@ver(peer)) and v9 (name@ver(peer)). Peer suffixes are dropped;
+// non-semver resolutions (git/tarball/link) return null and are skipped.
+function parsePnpmId(id, major) {
+  id = id.replace(/^['"]|['"]$/g, "");
+  const paren = id.indexOf("(");
+  if (paren !== -1) id = id.slice(0, paren); // strip v6/v9 peer suffix
+  id = id.replace(/^\//, "");
+  if (major < 6) {
+    const slash = id.lastIndexOf("/");
+    if (slash <= 0) return null;
+    let version = id.slice(slash + 1);
+    const us = version.indexOf("_"); // v5 peer separator follows the version
+    if (us !== -1) version = version.slice(0, us);
+    const name = id.slice(0, slash);
+    return svParse(version) ? { name, version } : null;
+  }
+  const at = id.lastIndexOf("@");
+  if (at <= 0) return null;
+  const name = id.slice(0, at);
+  const version = id.slice(at + 1);
+  return svParse(version) ? { name, version } : null;
+}
+
+// pnpm-lock.yaml: scan the `packages:` block (its keys are the resolved tree).
+// Indentation-only parse — no YAML dependency.
+function parsePnpmLock(text) {
+  const lvm = text.match(/^lockfileVersion:\s*['"]?([\d.]+)/m);
+  const major = lvm ? parseInt(lvm[1], 10) : 9;
+  const out = [];
+  let inPkgs = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^packages:\s*$/.test(line)) { inPkgs = true; continue; }
+    if (!inPkgs) continue;
+    if (/^\S/.test(line)) break; // next top-level section ends the block
+    const m = line.match(/^  (\S.*?):\s*$/); // exactly 2-space indent = a package key
+    if (!m) continue;
+    const parsed = parsePnpmId(m[1], major);
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
+
+// bun.lock (text JSONC). packages[key] = [ "name@version", source, {meta}, hash ].
+function parseBunLock(json) {
+  const out = [];
+  const pkgs = json.packages || {};
+  for (const key of Object.keys(pkgs)) {
+    const entry = pkgs[key];
+    const id = Array.isArray(entry) ? entry[0] : entry && entry.id;
+    if (typeof id !== "string") continue;
+    const at = id.lastIndexOf("@");
+    if (at <= 0) continue;
+    const name = id.slice(0, at);
+    const version = id.slice(at + 1);
+    if (svParse(version)) out.push({ name, version });
+  }
+  return out;
+}
+
+// yarn.lock (classic v1 and berry v2+). Each block is one or more comma-joined
+// descriptors followed by an indented `version` line. The descriptor's range
+// part flags non-registry sources (workspace/git/file/...), whose synthetic
+// versions (0.0.0-use.local) would otherwise pass the semver filter.
+const YARN_NON_REGISTRY = /^(workspace|link|portal|file|patch|exec|git|github|bitbucket|gitlab|https?):/i;
+function parseYarnLock(text) {
+  const out = [];
+  let entry = null; // { name, skip }
+  for (const line of text.split(/\r?\n/)) {
+    if (/^[^\s#]/.test(line)) {
+      const first = line.replace(/:\s*$/, "").split(",")[0].trim().replace(/^"|"$/g, "");
+      const at = first.lastIndexOf("@");
+      const name = at <= 0 ? first : first.slice(0, at);
+      const range = at <= 0 ? "" : first.slice(at + 1);
+      entry = { name, skip: YARN_NON_REGISTRY.test(range) };
+    } else if (entry) {
+      const m = line.match(/^\s+"?version"?:?\s+"?([^"\s]+)"?/);
+      if (m) {
+        if (!entry.skip && svParse(m[1])) out.push({ name: entry.name, version: m[1] });
+        entry = null;
+      }
+    }
+  }
+  return out;
+}
+
+// Pick the lockfile to trust, newest-ecosystem first. Binary bun.lockb can't be
+// read without bun, so it's flagged rather than parsed.
+function detectLockfile(cwd) {
+  const at = (n) => resolvePath(cwd, n);
+  const tryParse = (source, file, parse) => {
+    if (!existsSync(at(file))) return null;
+    try { return { source, entries: parse(readFileSync(at(file), "utf8")) }; }
+    catch { return null; }
+  };
+  return (
+    tryParse("pnpm-lock.yaml", "pnpm-lock.yaml", parsePnpmLock) ||
+    tryParse("bun.lock", "bun.lock", (t) => parseBunLock(parseJsonc(t))) ||
+    tryParse("package-lock.json", "package-lock.json", (t) => parsePackageLock(JSON.parse(t))) ||
+    tryParse("npm-shrinkwrap.json", "npm-shrinkwrap.json", (t) => parsePackageLock(JSON.parse(t))) ||
+    tryParse("yarn.lock", "yarn.lock", parseYarnLock) ||
+    (existsSync(at("bun.lockb")) ? { source: "bun.lockb", entries: null, binary: true } : null)
+  );
 }
 
 // ===================== scoring =====================
@@ -405,7 +626,7 @@ function score(records, { excludeKey = null, asked = 1 } = {}) {
 }
 
 // ===================== render =====================
-function render({ subject, version, project }, s, errCount) {
+function render({ subject, version, project, resolution, source }, s, errCount) {
   const line = gray("  " + "─".repeat(46));
   const gradeColor = s.grade === "A" || s.grade === "B" ? green : s.grade === "C" ? yellow : red;
   const out = [""];
@@ -469,7 +690,13 @@ function render({ subject, version, project }, s, errCount) {
   out.push(line);
   out.push(`  ${bold("GRADE")}  ${bold(gradeColor(s.grade))}   ${dim('"' + s.quip + '"')}`);
   if (errCount) out.push(gray(`  note: ${errCount} package(s) could not be resolved`));
-  out.push(gray("  resolved like npm — highest version satisfying each range"));
+  out.push(
+    gray(
+      resolution === "lockfile"
+        ? `  resolved from ${source} — exact installed versions`
+        : "  resolved like npm — highest version satisfying each range"
+    )
+  );
   out.push("");
   console.log(out.join("\n"));
 }
@@ -490,7 +717,9 @@ function usage() {
   console.log(
     `\n  ${bold("depsift")} ${dim("— should i install this?")}\n\n` +
     `  ${cyan("npx depsift <package>")}   ${dim("audit one package before you add it")}\n` +
-    `  ${cyan("npx depsift")}             ${dim("audit every dependency in ./package.json")}\n\n` +
+    `  ${cyan("npx depsift")}             ${dim("audit your installed tree (uses the lockfile if present)")}\n\n` +
+    `  ${dim("lockfiles: pnpm-lock.yaml, bun.lock, package-lock.json — auto-detected.")}\n` +
+    `  ${dim("pass")} ${cyan("--no-lock")} ${dim("to re-resolve package.json ranges from the registry instead.")}\n\n` +
     `  e.g.  ${dim("npx depsift express")}\n`
   );
 }
@@ -512,6 +741,22 @@ function readProjectDeps() {
   return { name: json.name || "this project", seeds };
 }
 
+// Resolve what to audit in project mode. With a lockfile present (and not
+// disabled) we audit the exact installed tree; otherwise we fall back to
+// re-resolving package.json ranges against the registry.
+function loadProject({ useLock = true } = {}) {
+  const proj = readProjectDeps();
+  if (!proj) return null;
+  if (!useLock) return { ...proj, locked: null };
+  const lf = detectLockfile(process.cwd());
+  if (!lf) return { ...proj, locked: null };
+  if (lf.binary) return { ...proj, locked: null, binaryLock: lf.source };
+  if (!lf.entries || !lf.entries.length) return { ...proj, locked: null };
+  const direct = new Set(proj.seeds.map((s) => s.name));
+  const locked = lf.entries.map((e) => ({ ...e, depth: direct.has(e.name) ? 1 : 2 }));
+  return { ...proj, locked, lockSource: lf.source };
+}
+
 async function main() {
   const argv = process.argv.slice(2).filter((a) => !a.startsWith("-"));
   const spinner = () => process.stdout.isTTY && process.stdout.write(dim("  resolving…\r"));
@@ -519,19 +764,31 @@ async function main() {
 
   // ---- project mode: no package given ----
   if (!argv.length) {
-    const proj = readProjectDeps();
+    const useLock = !process.argv.slice(2).includes("--no-lock");
+    const proj = loadProject({ useLock });
     if (!proj) { usage(); return shutdown(1); }
-    if (!proj.seeds.length) {
+    if (proj.binaryLock)
+      console.error(
+        `  ${yellow("note")} ${dim(`${proj.binaryLock} is a binary lockfile depsift can't read — auditing package.json ranges instead (bun's text lockfile, bun.lock, is supported).`)}`
+      );
+    const usingLock = !!(proj.locked && proj.locked.length);
+    if (!usingLock && !proj.seeds.length) {
       console.log(`\n  ${green("✓")} ${bold(proj.name)} has no dependencies.\n`);
       return shutdown(0);
     }
     spinner();
-    const { records, errors } = await resolveSeeds(proj.seeds);
+    const { records, errors } = usingLock
+      ? await resolveLocked(proj.locked)
+      : await resolveSeeds(proj.seeds);
     clearSpinner();
     if (!records.length) { console.error(`\n  ${red("✗")} could not resolve dependencies\n`); return shutdown(1); }
     await fetchAdvisories(records);
     const s = score(records, { asked: proj.seeds.length });
-    render({ subject: proj.name, project: true }, s, errors.length);
+    render(
+      { subject: proj.name, project: true, resolution: usingLock ? "lockfile" : "registry", source: proj.lockSource },
+      s,
+      errors.length
+    );
     return shutdown(s.grade === "F" ? 2 : 0);
   }
 
@@ -558,7 +815,23 @@ async function main() {
   return shutdown(s.grade === "F" ? 2 : 0);
 }
 
-main().catch(async (e) => {
-  console.error(e);
-  await shutdown(1);
-});
+// Run only when invoked as the CLI, so the parsers can be imported for tests.
+// Compare *real* paths: npm/pnpm/npx install the bin as a symlink, so argv[1]
+// (the symlink) and import.meta.url (the resolved file) differ otherwise.
+function isCliEntry() {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return realpathSync(arg) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isCliEntry()) {
+  main().catch(async (e) => {
+    console.error(e);
+    await shutdown(1);
+  });
+}
+
+export { parseJsonc, parsePackageLock, parsePnpmId, parsePnpmLock, parseBunLock, parseYarnLock };
